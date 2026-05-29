@@ -1,240 +1,198 @@
-# 🚀 Cloud Log Monitoring System
+# Cloud Log Monitoring System
 
-A containerized, real-time observability and telemetry analytics microservices pipeline. This system generates live event streams, processes them asynchronously, stores logs in persistent JSON Lines format, runs automated anomaly detection rules, and visualizes system health on a comprehensive 8-panel Streamlit dashboard.
+Real-time log monitoring pipeline built with Python microservices. Three Docker containers work together — one generates logs, one analyzes them for anomalies, and one displays everything on a live dashboard. Logs are persisted to disk so nothing gets lost on restarts.
 
----
-
-## 📌 Table of Contents
-1. [System Architecture](#-system-architecture)
-2. [Prerequisites](#-prerequisites)
-3. [Quick Start & Setup](#-quick-start--setup)
-4. [Deployment & Orchestration (`deploy.sh`)](#-deployment--orchestration-deploysh)
-5. [Microservices Deep-Dive](#-microservices-deep-dive)
-    - [Log Producer](#1-log-producer)
-    - [Log Analyzer](#2-log-analyzer)
-    - [Streamlit Dashboard](#3-streamlit-dashboard)
-6. [API Endpoint Reference](#-api-endpoint-reference)
-7. [CI/CD Pipeline & Smoke Tests](#-cicd-pipeline--smoke-tests)
-8. [Troubleshooting & FAQs](#-troubleshooting--faqs)
-9. [Future Roadmap](#-future-roadmap)
-10. [License](#-license)
+**Tech stack:** Python · FastAPI · Streamlit · Docker Compose · GitHub Actions
 
 ---
 
-## 🏗️ System Architecture
+## How It Works
 
-The project is structured as a decoupled microservices architecture orchestrating three core containers:
+The system follows a simple producer-analyzer-dashboard flow:
 
-```mermaid
-graph TD
-    P[Log Producer Microservice] -->|HTTP POST JSON /ingest-log| A[Log Analyzer Microservice]
-    
-    subgraph Analyzer Container [Analyzer Service - Port 8001]
-        A -->|Enqueue| Q[asyncio.Queue]
-        Q -->|Worker Thread| W[Async Anomaly Detector]
-        W -->|1. Memory List| M[(In-Memory Logs)]
-        W -->|2. Append Record| FL[(logs.jsonl File)]
-        W -->|3. Evaluate Thresholds| AD{Error Count >= 5?}
-        AD -->|Yes| AL[Trigger Alert: High Error Rate]
-    end
-    
-    FL <==>|Docker Volume Mount| V[(Persistent Volume: analyzer-logs)]
-    
-    subgraph Dashboard Container [Dashboard Service - Port 8501]
-        D[Streamlit Dashboard Web App] -->|Polls metrics, logs & alerts| A
-        D -->|Sidebar Control| FIL[Filter / Search Engine]
-        D -->|Sidebar Reset Action| R[POST /reset]
-    end
+```
+Producer (generates logs) ──HTTP POST──> Analyzer (processes + stores) <──polls── Dashboard (displays)
 ```
 
----
+- The **Producer** sends simulated log events (INFO, WARNING, ERROR) to the Analyzer every second.
+- The **Analyzer** receives them, pushes each log into an async queue, and a background worker handles the rest — writing to a `.jsonl` file on disk, tracking error counts, and triggering alerts if errors pile up.
+- The **Dashboard** polls the Analyzer's API every 2 seconds and renders everything in a Streamlit web app.
 
-## 📋 Prerequisites
-
-Before running the application, ensure your environment meets the following requirements:
-*   **Operating System**: Windows 10/11, macOS, or Linux.
-*   **Docker Desktop**: Installed and running (v20.10+).
-*   **Python**: Version `3.10` or higher (only required for local native testing outside Docker).
-*   **Git**: For checking out the code.
+All three services are containerized and wired together through Docker Compose.
 
 ---
 
-## 🚀 Quick Start & Setup
+## Getting Started
 
-### 1. Clone the Repository
+### What you need
+- Docker Desktop (v20.10+)
+- Git
+- Python 3.10+ (only if you want to run tests outside Docker)
+
+### Clone and run
+
 ```bash
 git clone https://github.com/Mazhar26/Cloud-log.git
 cd Cloud-log
-```
-
-### 2. Launch the Stack (Docker Compose)
-To start all services in detached mode:
-```bash
 docker compose up --build -d
 ```
-This spins up:
-*   **Analyzer** at [http://localhost:8001](http://localhost:8001)
-*   **Producer** (runs internally, sending telemetry to the Analyzer)
-*   **Streamlit Dashboard** at [http://localhost:8501](http://localhost:8501)
 
-### 3. Verify Container Statuses
-```bash
-docker compose ps
-```
+That's it. Open [http://localhost:8501](http://localhost:8501) for the dashboard, or hit [http://localhost:8001](http://localhost:8001) to check the analyzer API directly.
 
-### 4. Stop Services
+To bring everything down:
+
 ```bash
 docker compose down -v
 ```
 
 ---
 
-## 🛠️ Deployment & Orchestration (`deploy.sh`)
+## Project Structure
 
-A dedicated container orchestration script is included in the project root to manage the container lifecycle.
+```
+Cloud-Log/
+├── producer/
+│   ├── main.py              # Log event generator (1 event/sec)
+│   ├── Dockerfile
+│   └── requirements.txt
+├── analyzer/
+│   ├── main.py              # FastAPI backend with async processing
+│   ├── Dockerfile
+│   └── requirements.txt
+├── frontend/
+│   ├── app.py               # Streamlit dashboard (8 panels)
+│   ├── Dockerfile
+│   └── requirements.txt
+├── tests/
+│   └── smoke_test.py        # Integration tests
+├── docker-compose.yml
+├── deploy.sh                # Orchestration helper script
+└── README.md
+```
 
-Make the script executable (Mac/Linux):
+---
+
+## The Three Services
+
+### Producer
+
+Lives in `producer/main.py`. A simple FastAPI app that spawns a background thread on startup. The thread runs in an infinite loop — every second it picks a random log level (INFO, WARNING, or ERROR), builds a JSON payload, and POSTs it to the analyzer's `/ingest-log` endpoint. Nothing fancy, but it gives you a steady stream of events to work with.
+
+**Throughput:** ~60 log events per minute.
+
+### Analyzer
+
+Lives in `analyzer/main.py`. This is the core of the system.
+
+When a log comes in through `/ingest-log`, it doesn't get processed right there in the request handler. Instead, it goes into an `asyncio.Queue`. A background coroutine (`async_anomaly_detector`) picks up items from that queue and does three things:
+
+1. Appends the log to an in-memory list (for fast reads)
+2. Writes it to `logs.jsonl` inside a Docker volume (for persistence)
+3. Checks if the cumulative error count has crossed the threshold (currently set to 5)
+
+On startup, the analyzer reads back the existing `logs.jsonl` file to restore state — so if the container restarts, your metrics and alert status pick up where they left off.
+
+**API endpoints:**
+
+| Method | Route | What it does |
+|--------|-------|-------------|
+| `GET` | `/` | Health check |
+| `POST` | `/ingest-log` | Accept a log event (`{"level": "...", "message": "..."}`) |
+| `GET` | `/logs` | Return the last 50 log entries |
+| `GET` | `/stats` | Return `total_logs` and `error_count` |
+| `GET` | `/alerts` | Return active alert message (or null) |
+| `POST` | `/reset` | Wipe all logs from memory and disk |
+
+### Dashboard
+
+Lives in `frontend/app.py`. A Streamlit app that polls the analyzer every 2 seconds and renders 8 panels:
+
+1. **System status banner** — green when things are fine, red when an alert is active
+2. **Total logs ingested** — running count
+3. **Error count + rate** — shows both the raw number and the percentage
+4. **Alert details** — shows the active alert message if one exists
+5. **Log level distribution** — bar chart breaking down INFO vs WARNING vs ERROR
+6. **Ingestion timeline** — line chart showing log volume over time
+7. **Search and filter controls** — sidebar with text search and level dropdown
+8. **Log stream table** — sortable table with the raw log records, newest first
+
+The sidebar also has a "Clear & Reset" button that hits the analyzer's `/reset` endpoint.
+
+---
+
+## Deploy Script
+
+There's a `deploy.sh` in the root that wraps common Docker Compose operations. On Mac/Linux, make it executable first:
+
 ```bash
 chmod +x deploy.sh
 ```
 
-### Command Usage
-*   **Build and start all services**:
-    ```bash
-    ./deploy.sh --up
-    ```
-*   **Check status of running containers**:
-    ```bash
-    ./deploy.sh --status
-    ```
-*   **Tail logs from all services in real time**:
-    ```bash
-    ./deploy.sh --logs
-    ```
-*   **Run integration smoke tests**:
-    ```bash
-    ./deploy.sh --verify
-    ```
-*   **Restart the service stack**:
-    ```bash
-    ./deploy.sh --restart
-    ```
-*   **Stop services and clean up volumes**:
-    ```bash
-    ./deploy.sh --down
-    ```
+Then use it like:
+
+```bash
+./deploy.sh --up        # Build and start everything
+./deploy.sh --down      # Stop and remove volumes
+./deploy.sh --restart   # Restart all services
+./deploy.sh --status    # Check container states
+./deploy.sh --logs      # Tail logs from all containers
+./deploy.sh --verify    # Run health checks + smoke tests
+```
 
 ---
 
-## 🔍 Microservices Deep-Dive
+## CI Pipeline
 
-### 1. Log Producer
-*   **File location**: [producer/main.py](file:///d:/Projects/Cloud-Log/producer/main.py)
-*   **Description**: Simulates production log output by dispatching HTTP POST events to the Analyzer.
-*   **Throughput**: Runs continuously, producing **1 log event per second** (60 events/minute).
-*   **Metadata distribution**: Dispatches messages with randomized severities: `INFO`, `WARNING`, and `ERROR`.
+GitHub Actions runs on every push and PR to `main`. The workflow (`.github/workflows/ci.yml`) does the following:
 
-### 2. Log Analyzer
-*   **File location**: [analyzer/main.py](file:///d:/Projects/Cloud-Log/analyzer/main.py)
-*   **Asynchronous Engine**: Employs an `asyncio.Queue` mechanism to accept logs instantly at `/ingest-log`, decoupling request ingestion from back-end file writes and evaluation logic.
-*   **State Persistence**: Outputs structured JSON lines to a persistent volume file (`logs.jsonl`). Upon startup, the container reads this file to reconstruct past metrics and alert states.
-*   **Anomaly detection**: Triggers a system alert once the cumulative `ERROR` count exceeds the threshold of 5.
+1. Spins up the full Docker Compose stack on an Ubuntu runner
+2. Installs Python and the `requests` library
+3. Runs `tests/smoke_test.py`, which:
+   - Resets the analyzer state
+   - Sends 5 mixed log events and verifies the counts are accurate
+   - Sends 4 more ERROR logs to cross the threshold (5 total errors)
+   - Confirms the alert actually triggered
+4. Hits the Streamlit container with `curl` to make sure it's responding
+5. Tears everything down
 
-### 3. Streamlit Dashboard
-*   **File location**: [frontend/app.py](file:///d:/Projects/Cloud-Log/frontend/app.py)
-*   **UI Refresh Rate**: Auto-polls the Analyzer endpoints every 2 seconds.
-*   **8 Panel Layout Details**:
-    1.  **System Health Status Banner**: Colored panel flashing "SYSTEM STABLE" (green) or "ALERT ACTIVE" (red).
-    2.  **Total Ingestion Volume Card**: Metric panel reflecting total logs processed.
-    3.  **Total Error Volume Card**: Metric panel showing errors alongside the calculated error percentage rate.
-    4.  **Data Anomaly Alerts Card**: Informational card showing active warnings.
-    5.  **Log Level Distribution Chart**: Interactive bar chart displaying count per severity.
-    6.  **Ingest Time-Series Timeline Chart**: Live line chart plotting log traffic.
-    7.  **Interactive Search & Filtering Panel**: Sidebar panel for text matching and log level selection.
-    8.  **Real-time Log Stream Data Profile**: Sortable tabular view containing the raw log records.
+If any step fails, the pipeline fails. The teardown runs regardless so containers don't linger.
 
 ---
 
-## 🔌 API Endpoint Reference
+## Persistent Logging
 
-All endpoints are hosted by the **Analyzer** microservice on port `8001`:
+Logs are written to `/app/logs/logs.jsonl` inside the analyzer container. That path is backed by a named Docker volume (`analyzer-logs`), so the data survives container restarts.
 
-### 1. Health Check
-*   **Route**: `GET /`
-*   **Response**: `{"message": "Analyzer Service Running 🚀"}`
+Each line in the file is a JSON object:
 
-### 2. Ingest Log Event
-*   **Route**: `POST /ingest-log`
-*   **Payload**:
-    ```json
-    {
-      "level": "ERROR",
-      "message": "Critical database connection failure."
-    }
-    ```
-*   **Response**: `{"status": "log received"}`
+```json
+{"level": "ERROR", "message": "Connection timeout error", "timestamp": "14:32:07"}
+```
 
-### 3. Get Logs Stream
-*   **Route**: `GET /logs`
-*   **Response**: Returns the last 50 processed log entries.
-
-### 4. Get Statistics
-*   **Route**: `GET /stats`
-*   **Response**:
-    ```json
-    {
-      "total_logs": 128,
-      "error_count": 4
-    }
-    ```
-
-### 5. Get Alert State
-*   **Route**: `GET /alerts`
-*   **Response**: `{"alert": "🚨 High error rate detected!"}` (or `null`)
-
-### 6. Reset Log Store
-*   **Route**: `POST /reset`
-*   **Response**: `{"status": "reset successful"}` (clears in-memory list and deletes `logs.jsonl` from disk).
+On startup, the analyzer reads this file line by line to rebuild its in-memory state.
 
 ---
 
-## 🤖 CI/CD Pipeline & Smoke Tests
+## Troubleshooting
 
-The project is integrated with GitHub Actions through [.github/workflows/ci.yml](file:///d:/Projects/Cloud-Log/.github/workflows/ci.yml).
+**Port already in use** — If 8001 or 8501 is taken, stop whatever's using it or change the port mapping in `docker-compose.yml`.
 
-### Integration Test Flow:
-1.  Initiates Docker Compose environment.
-2.  Sets up Python virtual runtime.
-3.  Executes the automated test script at [tests/smoke_test.py](file:///d:/Projects/Cloud-Log/tests/smoke_test.py):
-    - Sends a `POST /reset` request.
-    - Asserts stats are zeroed out.
-    - Dispatches 5 logs to verify ingestion and check in-memory counter accuracy.
-    - Dispatches 4 additional errors to exceed the threshold (total 5 errors) and asserts that an alert is successfully generated.
-4.  Pings the Streamlit dashboard on port `8501` to ensure frontend availability.
-5.  Tears down and cleans up services.
+**Dashboard says "Connecting to Analyzer..."** — The frontend can't reach the backend. Run `docker compose ps` to check if the analyzer container is actually running.
+
+**Logs don't persist after restart** — Make sure the Docker volume is set up properly. Run `docker volume inspect cloud-log_analyzer-logs` to verify.
 
 ---
 
-## 🚨 Troubleshooting & FAQs
+## What's Next
 
-### Q: "Uvicorn failed to bind: Port 8001 or 8501 is already in use"
-**A**: Ensure no local instance of Streamlit or FastAPI is running. You can stop conflicting compose stacks by running `docker compose down`.
-
-### Q: "Logs do not appear to persist across restarts"
-**A**: Verify that the Docker volume mount is configured correctly. Run `docker volume inspect cloud-log_analyzer-logs` to confirm the persistent storage mount.
-
-### Q: "The Streamlit UI shows 'Connecting to Analyzer microservice...'"
-**A**: This indicates the frontend cannot reach the analyzer. Check if the analyzer service is running via `docker compose ps` and verify network configurations.
+Some things I'd like to add down the line:
+- Elasticsearch integration for proper log indexing and search
+- Slack/email notifications when alerts trigger
+- Auth layer on the ingestion endpoints
+- Prometheus metrics exporter for external monitoring
 
 ---
 
-## 🗺️ Future Roadmap
-*   **Log Indexing Integration**: Integrate Elasticsearch/Kibana for full-text search capability.
-*   **Alert Notifications**: Wire Slack/Email webhook triggers inside the anomaly detector task.
-*   **Authentication**: Add OAuth2/JWT middleware security boundaries around log ingestion endpoints.
-*   **Metrics Exporters**: Integrate Prometheus metrics exporter.
+## License
 
----
-
-## 📄 License
-This project is open-source and licensed under the MIT License.
+MIT
