@@ -260,4 +260,4 @@ GitHub Actions runs on every push and PR to `main` (`.github/workflows/ci.yml`):
 
 ## 📄 License
 
-This project is licensed under the MIT License.
+This project is licensed under the [MIT License](LICENSE).
