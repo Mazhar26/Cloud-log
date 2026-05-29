@@ -4,32 +4,43 @@ on:
   push:
     branches:
       - main
-
   pull_request:
     branches:
       - main
 
 jobs:
-  docker-build:
-
+  integration-test:
     runs-on: ubuntu-latest
 
     steps:
-
       - name: Checkout Repository
         uses: actions/checkout@v4
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Build Analyzer Service
-        run: docker build ./analyzer -t analyzer
+      - name: Start Docker Compose Services
+        run: docker compose up --build -d
 
-      - name: Build Producer Service
-        run: docker build ./producer -t producer
+      - name: Check Container Status
+        run: docker compose ps
 
-      - name: Build Frontend Service
-        run: docker build ./frontend -t frontend
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
 
-      - name: CI Pipeline Success
-        run: echo "All services built successfully!"
+      - name: Install Dependencies
+        run: pip install requests
+
+      - name: Run Smoke Tests
+        run: python tests/smoke_test.py
+
+      - name: Run Frontend Health Check
+        run: |
+          # Verify Streamlit container responds with a HTTP status code
+          curl -I http://localhost:8501 || exit 1
+
+      - name: Tear Down Services
+        if: always()
+        run: docker compose down -v
